@@ -488,17 +488,17 @@ async function supaLoad(){
     if(!r.ok)return null;
     const rows=await r.json();
     return rows.length?rows[0].payload:null;
-  }catch(e){return null;}
+  }catch(e){console.error('supaLoad failed',e);return null;}
 }
 
 async function supaSave(data){
   try{
-    await fetch(`${SUPA_URL}/rest/v1/va_data`,{
+    await fetch(`${SUPA_URL}/rest/v1/va_data?on_conflict=id`,{
       method:'POST',
       headers:{...SUPA_HEADERS,'Prefer':'resolution=merge-duplicates'},
       body:JSON.stringify({id:'main',payload:data,updated_at:new Date().toISOString()})
     });
-  }catch(e){}
+  }catch(e){console.error('supaSave failed',e);}
 }
 
 let saveTimer=null;
