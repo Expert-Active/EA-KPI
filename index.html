@@ -460,11 +460,12 @@ function hexToRgba(hex,a){const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.sli
 function catStyles(color){return{color,badge:hexToRgba(color,.15),borderColor:hexToRgba(color,.4)}}
 function getCats(){return(S.categories||DEFAULT_CATS).map(c=>({...c,...catStyles(c.color)}))}
 
-// Parse #tags from text — returns {cleanText, tags[]}
+// Extract #tags from text but keep the original text intact
 function parseTags(text){
   const tags=[];
-  const clean=text.replace(/#([\w\d_-]+)/g,(_,t)=>{tags.push(t.toLowerCase());return''}).replace(/\s{2,}/g,' ').trim();
-  return{cleanText:clean,tags:[...new Set(tags)]};
+  const matches=text.match(/#([\w\d_-]+)/g)||[];
+  matches.forEach(m=>tags.push(m.slice(1).toLowerCase()));
+  return{text:text.trim(), tags:[...new Set(tags)]};
 }
 
 function tagsFromInput(raw){
@@ -488,59 +489,79 @@ async function supaLoad(){
     if(!r.ok)return null;
     const rows=await r.json();
     return rows.length?rows[0].payload:null;
-  }catch(e){console.error('supaLoad failed',e);return null;}
+  }catch(e){return null;}
 }
 
 async function supaSave(data){
   try{
-    await fetch(`${SUPA_URL}/rest/v1/va_data?on_conflict=id`,{
-      method:'POST',
-      headers:{...SUPA_HEADERS,'Prefer':'resolution=merge-duplicates'},
-      body:JSON.stringify({id:'main',payload:data,updated_at:new Date().toISOString()})
+    const r=await fetch(`${SUPA_URL}/rest/v1/va_data?id=eq.main`,{
+      method:'PATCH',
+      headers:{
+        'Content-Type':'application/json',
+        'apikey':SUPA_KEY,
+        'Authorization':'Bearer '+SUPA_KEY
+      },
+      body:JSON.stringify({payload:data,updated_at:new Date().toISOString()})
     });
-  }catch(e){console.error('supaSave failed',e);}
+    if(!r.ok) console.error('Cloud save HTTP error:',r.status);
+  }catch(e){
+    console.error('Cloud save failed:',e);
+  }
 }
 
 let saveTimer=null;
 function save(){
-  // instant local cache
   try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}
-  // debounced cloud save (500ms)
   clearTimeout(saveTimer);
-  saveTimer=setTimeout(()=>supaSave(S),500);
+  saveTimer=setTimeout(()=>supaSave(S),400);
 }
 
 async function load(){
-  // show loading overlay
   document.getElementById('loading-overlay').style.display='flex';
-  // try cloud first, fall back to localStorage
-  let data=await supaLoad();
-  if(!data){
-    try{const d=localStorage.getItem(KEY);if(d)data=JSON.parse(d)}catch(e){}
-  }
-  if(data && typeof data==='object')S={...S,...data};
-  // ensure all required keys exist (guards against empty or partial payloads)
-  if(!S.vas||typeof S.vas!=='object')S.vas={};
-  if(!S.categories||!Array.isArray(S.categories))S.categories=DEFAULT_CATS.map(c=>({...c}));
-  if(!S.timeline)S.timeline='biweekly';
-  if(!S.customFrom)S.customFrom=null;
-  if(!S.customTo)S.customTo=null;
+
+  // load localStorage first as baseline
+  let localData=null;
+  try{const d=localStorage.getItem(KEY);if(d)localData=JSON.parse(d);}catch(e){}
+
+  // try cloud
+  let cloudData=await supaLoad();
+
+  // prefer whichever has more data (more VA keys = more complete)
+  let data=null;
+  const localCount=localData&&localData.vas?Object.keys(localData.vas).length:0;
+  const cloudCount=cloudData&&cloudData.vas?Object.keys(cloudData.vas).length:0;
+  if(cloudCount>0 && cloudCount>=localCount) data=cloudData;
+  else if(localCount>0) data=localData;
+  else if(cloudData&&Object.keys(cloudData).length>1) data=cloudData;
+  else data=localData;
+
+  if(data&&typeof data==='object') S={...S,...data};
+
+  // ensure required fields
+  if(!S.vas||typeof S.vas!=='object') S.vas={};
+  if(!S.categories||!Array.isArray(S.categories)) S.categories=DEFAULT_CATS.map(c=>({...c}));
+  if(!S.timeline) S.timeline='biweekly';
+  if(!S.customFrom) S.customFrom=null;
+  if(!S.customTo) S.customTo=null;
   if(!Object.keys(S.vas).length){
-    S.vas['Maria']={issues:[],archived:false};
-    S.vas['James']={issues:[],archived:false};
-    if(!S.current)S.current='Maria';
+    S.vas['Mervat']={issues:[],archived:false};
+    if(!S.current) S.current='Mervat';
   }
   Object.keys(S.vas).forEach(n=>{
-    if(!S.vas[n])S.vas[n]={issues:[],archived:false};
-    if(!Array.isArray(S.vas[n].issues))S.vas[n].issues=[];
-    if(S.vas[n].archived===undefined)S.vas[n].archived=false;
+    if(!S.vas[n]) S.vas[n]={issues:[],archived:false};
+    if(!Array.isArray(S.vas[n].issues)) S.vas[n].issues=[];
+    if(S.vas[n].archived===undefined) S.vas[n].archived=false;
   });
+  if(!S.current||!S.vas[S.current]){
+    S.current=Object.keys(S.vas).filter(n=>!S.vas[n].archived)[0]||null;
+  }
+
   // restore active pill
   if(S.timeline==='custom'){
     document.getElementById('custom-range-btn').classList.add('custom-active');
   } else {
     const match=document.querySelector(`.tpill[data-tl="${S.timeline}"]`);
-    if(match){document.querySelectorAll('.tpill[data-tl]').forEach(b=>b.classList.remove('active'));match.classList.add('active')}
+    if(match){document.querySelectorAll('.tpill[data-tl]').forEach(b=>b.classList.remove('active'));match.classList.add('active');}
   }
   document.getElementById('loading-overlay').style.display='none';
   renderSidebar();renderAll();
@@ -550,8 +571,7 @@ async function load(){
 function toggleSettings(){
   showingSettings=!showingSettings;
   document.getElementById('settings-btn').classList.toggle('active',showingSettings);
-  document.getElementById('content').style.display=showingSettings?'none':'flex';
-  document.getElementById('content').style.flexDirection='column';
+  document.getElementById('content').style.display=showingSettings?'none':'block';
   document.getElementById('settings-page').classList.toggle('visible',showingSettings);
   document.getElementById('chatbar-wrap').style.display=showingSettings?'none':'block';
   document.getElementById('timeline-pills').style.display=showingSettings?'none':'flex';
@@ -624,8 +644,7 @@ function renderAll(){
     const active=Object.keys(S.vas).filter(n=>!S.vas[n].archived);
     S.current=active[0]||null;
   }
-  document.getElementById('content').style.display='flex';
-  document.getElementById('content').style.flexDirection='column';
+  document.getElementById('content').style.display='block';
   if(!S.current){
     document.getElementById('empty-state').style.display='block';
     document.getElementById('dashboard').style.display='none';
@@ -640,7 +659,9 @@ function renderAll(){
   document.getElementById('topbar-sub').textContent=`viewing · ${tlLabel()}`;
   const isArch=S.vas[S.current].archived;
   document.getElementById('topbar-badge').innerHTML=isArch?`<span class="status-badge archived"><span class="status-dot"></span>Archived</span>`:'';
-  renderDashboard();renderTagsSection();renderLog();
+  try{renderDashboard();}catch(e){console.error('renderDashboard error',e);}
+  try{renderTagsSection();}catch(e){console.error('renderTagsSection error',e);}
+  try{renderLog();}catch(e){console.error('renderLog error',e);}
 }
 
 function filtered(){
@@ -918,29 +939,35 @@ function deleteIssueAt(idx){S.vas[S.current].issues.splice(idx,1);save();renderS
 function closeEditModal(){document.getElementById('edit-modal').classList.remove('open');editIdx=null}
 
 /* ── Log issue ── */
-async function submitIssue(){
+function guessCat(text){
+  const t=text.toLowerCase();
+  const CATS=getCats();
+  const rules=[
+    {keys:['deadline','late','overdue','delay','miss','due'],cat:'deadline'},
+    {keys:['error','mistake','wrong','incorrect','broken','bug','fail','bad'],cat:'error'},
+    {keys:['quality','poor','sloppy','format','spelling','grammar','draft','revis'],cat:'quality'},
+    {keys:['communicat','respond','reply','email','message','slack','contact','update','notify'],cat:'communication'},
+    {keys:['slow','response time','took too long','hours','waiting','wait'],cat:'response'},
+    {keys:['task','complet','finish','done','deliver','submit','assign','todo'],cat:'task'},
+  ];
+  for(const rule of rules){
+    if(rule.keys.some(k=>t.includes(k))){
+      const match=CATS.find(c=>c.key===rule.cat);
+      if(match)return match.key;
+    }
+  }
+  return CATS[CATS.length-1].key;
+}
+
+function submitIssue(){
   if(!S.current||S.vas[S.current].archived)return;
   const input=document.getElementById('issue-input');
-  const raw=input.value.trim();if(!raw)return;
-  const {cleanText,tags}=parseTags(raw);
-  const text=cleanText||raw;
-  const btn=document.getElementById('log-btn');
-  btn.textContent='Thinking...';btn.disabled=true;
-  const CATS=getCats();let catKey=CATS[CATS.length-1].key;
-  try{
-    const catList=CATS.map(c=>`"${c.key}" = ${c.label}`).join(', ');
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:50,
-        messages:[{role:'user',content:`Categorize this VA performance issue into exactly one category. Categories: ${catList}. Issue: "${text}". Reply with ONLY the category key word, nothing else.`}]})
-    });
-    const data=await res.json();
-    const r=(data.content[0].text||'').trim().toLowerCase().replace(/[^a-z0-9_]/g,'');
-    if(CATS.find(c=>c.key===r))catKey=r;
-  }catch(e){}
+  const raw=input.value.trim();
+  if(!raw)return;
+  const {text,tags}=parseTags(raw);
+  const catKey=guessCat(text);
   pending={text,tags,cat:catKey,ts:Date.now()};
   showConfirm();
-  btn.textContent='Log issue';btn.disabled=false;
 }
 
 function showConfirm(){
@@ -954,14 +981,39 @@ function showConfirm(){
 }
 
 function confirmLog(){
-  if(!pending)return;
-  if(!S.vas[S.current])S.vas[S.current]={issues:[],archived:false};
-  S.vas[S.current].issues.push(pending);
+  if(!pending){console.error('confirmLog: pending is null');return;}
+  if(!S.current){console.error('confirmLog: no current VA');return;}
+  if(!S.vas[S.current]) S.vas[S.current]={issues:[],archived:false};
+  if(!Array.isArray(S.vas[S.current].issues)) S.vas[S.current].issues=[];
+  const issue={
+    text: pending.text,
+    tags: pending.tags||[],
+    cat: pending.cat,
+    ts: pending.ts||Date.now()
+  };
+  S.vas[S.current].issues.push(issue);
   pending=null;
   document.getElementById('issue-input').value='';
   document.getElementById('confirm-area').style.display='none';
   document.getElementById('cat-picker').style.display='none';
-  save();renderSidebar();renderAll();
+  save();
+  showToast('Issue logged');
+  renderSidebar();
+  renderAll();
+}
+
+function showToast(msg){
+  let t=document.getElementById('toast');
+  if(!t){
+    t=document.createElement('div');
+    t.id='toast';
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#c8f064;color:#0f0f0f;padding:8px 20px;border-radius:99px;font-family:DM Mono,monospace;font-size:12px;font-weight:500;z-index:999;transition:opacity .3s';
+    document.body.appendChild(t);
+  }
+  t.textContent=msg;
+  t.style.opacity='1';
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>t.style.opacity='0',2000);
 }
 function showCatPicker(){
   const CATS=getCats();
